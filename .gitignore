@@ -1,0 +1,22 @@
+# build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+*.log
+
+# coverage / fuzz artifacts
+*.gcda
+*.gcno
+*.gcov
+out*/
+queue/
+crashes/
+hangs/
+
+# editor / misc
+.DS_Store
+.vscode/
+.idea/
