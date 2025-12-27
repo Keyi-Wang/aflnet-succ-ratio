@@ -100,8 +100,9 @@
 int total_msg_send = 0;                     /* Message sent to the target via the protocol */
 int total_M2_send = 0;
 static _Atomic uint64_t g_pkt_total = 0;
-static _Atomic uint64_t g_pkt_suc = 0;
+static _Atomic uint64_t g_pkt_sem_suc = 0;
 static _Atomic uint64_t g_pkt_gram_suc = 0;
+static _Atomic uint64_t g_pkt_suc = 0;
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *out_file,                  /* File to fuzz, if any             */
           *out_dir,                   /* Working & output directory       */
@@ -502,11 +503,12 @@ static void stats_load_state(void) {
 
     FILE *fp = fopen(state_path, "r");
     if (!fp) return; // 首次运行，没有就算了
-    uint64_t t=0, e=0, r=0, g=0;
-    if (fscanf(fp, "%" SCNu64 " %" SCNu64 " %" SCNu64, &t, &r, &g) == 3) {
+    uint64_t t=0, s=0, r=0, g=0;
+    if (fscanf(fp, "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64, &t, &r, &g, &s) == 4) {
         atomic_store(&g_pkt_total, t);
-        atomic_store(&g_pkt_suc, r);
+        atomic_store(&g_pkt_sem_suc, r);
         atomic_store(&g_pkt_gram_suc, g);
+        atomic_store(&g_pkt_suc, s);
     }
     fclose(fp);
 }
@@ -4495,17 +4497,17 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
      execs_per_sec */
 
   if(strcmp(protocol_name,"MQTT")){ total_M2_send = g_pkt_total;}
-
-  double M2_succ_ratio = (double)g_pkt_suc / (double)(total_M2_send);
+  double M2_succ_ratio = (double)g_pkt_suc / (double)(total_M2_send);   
+  double M2_sem_succ_ratio = (double)g_pkt_sem_suc / (double)(total_M2_send);
   double M2_grammar_ratio = (double)g_pkt_gram_suc / (double)(total_M2_send);
 
   fprintf(plot_file,
-          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %u, %u, %u, %u, %llu, %llu, %0.03f, %0.03f \n",
+          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %u, %u, %u, %u, %llu, %llu, %llu, %0.03f, %0.03f, %0.03f \n",
           get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_crashes,
           unique_hangs, max_depth, eps, M2_start_region_ID, M2_region_count,
-          M2_cur_cnt, total_M2_send,
-          (unsigned long long)g_pkt_suc,(unsigned long long)g_pkt_gram_suc, M2_succ_ratio, M2_grammar_ratio);
+          M2_cur_cnt, total_M2_send, (unsigned long long)g_pkt_suc,
+          (unsigned long long)g_pkt_sem_suc,(unsigned long long)g_pkt_gram_suc, M2_succ_ratio, M2_sem_succ_ratio, M2_grammar_ratio);
 
 
   fflush(plot_file);
@@ -8415,7 +8417,7 @@ EXP_ST void setup_dirs_fds(void) {
 
   fprintf(plot_file, "# unix_time, cycles_done, cur_path, paths_total, "
                      "pending_total, pending_favs, map_size, unique_crashes, "
-                     "unique_hangs, max_depth, execs_per_sec, M2_start_region_ID, M2_region_count, M2_cur_cnt, total_M2_send, M2_suc, M2_succ_ratio\n");
+                     "unique_hangs, max_depth, execs_per_sec, M2_start_region_ID, M2_region_count, M2_cur_cnt, total_M2_send, M2_succ, M2_sem_succ, M2_gram_succ, M2_succ_ratio, M2_sem_succ_ratio, M2_sem_succ_ratio\n");
                      /* ignore errors */
 
 }
