@@ -429,6 +429,51 @@ region_t* (*extract_requests)(unsigned char* buf, unsigned int buf_size, unsigne
 /* For M2 sync*/
 static int   m2_shm_id  = -1;
 static u8*   m2_shm_ptr = NULL;
+/* 64B 对齐，保证 __atomic 对齐安全 */
+typedef struct __attribute__((aligned(64))) fuzz_stats_shm {
+  uint64_t magic;     /* 用于校验 */
+  uint32_t version;
+  uint32_t _rsv0;
+
+  uint64_t pkt_total;     /* mask==0 入口次数 */
+  uint64_t pkt_gram_ok;   /* FUZZ_STAT_GRAM_OK */
+  uint64_t pkt_sem_ok;    /* FUZZ_STAT_SEM_OK  */
+  uint64_t pkt_exec_ok;   /* FUZZ_STAT_EXEC_OK */
+
+  uint64_t _pad[8];       /* 预留 */
+} fuzz_stats_shm_t;
+
+#define FUZZ_STATS_MAGIC  0x46555A5A53544154ULL /* "FUZZSTAT" */
+#define FUZZ_STATS_VER    1
+static int stats_shm_id = -1;
+static fuzz_stats_shm_t *stats_shm_ptr = NULL;
+
+static void setup_stats_shm(void) {
+
+  stats_shm_id = shmget(IPC_PRIVATE, sizeof(fuzz_stats_shm_t),
+                        IPC_CREAT | IPC_EXCL | 0600);
+  if (stats_shm_id < 0) PFATAL("shmget() for stats shm failed");
+
+  char *id_str = alloc_printf("%d", stats_shm_id);
+  setenv("AFLNET_STATS_SHM_ID", id_str, 1);
+  ck_free(id_str);
+
+  void *p = shmat(stats_shm_id, NULL, 0);
+  if (!p || p == (void *)-1) PFATAL("shmat() for stats shm failed");
+
+  stats_shm_ptr = (fuzz_stats_shm_t *)p;
+
+  /* 初始化 */
+  memset(stats_shm_ptr, 0, sizeof(*stats_shm_ptr));
+  __atomic_store_n(&stats_shm_ptr->magic, FUZZ_STATS_MAGIC, __ATOMIC_RELEASE);
+  __atomic_store_n(&stats_shm_ptr->version, FUZZ_STATS_VER, __ATOMIC_RELEASE);
+}
+
+/* 可选：退出清理 */
+static void destroy_stats_shm(void) {
+  if (stats_shm_ptr) { shmdt(stats_shm_ptr); stats_shm_ptr = NULL; }
+  if (stats_shm_id >= 0) { shmctl(stats_shm_id, IPC_RMID, NULL); stats_shm_id = -1; }
+}
 
 static void setup_m2bit_shm(void) {
   m2_shm_id = shmget(IPC_PRIVATE, 1, IPC_CREAT | IPC_EXCL | 0600);
@@ -499,18 +544,39 @@ void fflush_state_file(void){
   fclose(fp);
 }
 
+static void stats_attach_from_env(void) {
+    if (stats_shm_ptr) return;
+
+    const char *s = getenv("AFLNET_STATS_SHM_ID");
+    if (!s || !*s) return;
+
+    int id = atoi(s);
+    void *p = shmat(id, NULL, SHM_RDONLY);
+    if (!p || p == (void*)-1) {
+        stats_shm_ptr = NULL;
+        return;
+    }
+    stats_shm_ptr = (fuzz_stats_shm_t*)p;
+}
+
 static void stats_load_state(void) {
 
-    FILE *fp = fopen(state_path, "r");
-    if (!fp) return; // 首次运行，没有就算了
-    uint64_t t=0, s=0, r=0, g=0;
-    if (fscanf(fp, "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64, &t, &r, &g, &s) == 4) {
-        atomic_store(&g_pkt_total, t);
-        atomic_store(&g_pkt_sem_suc, r);
-        atomic_store(&g_pkt_gram_suc, g);
-        atomic_store(&g_pkt_suc, s);
-    }
-    fclose(fp);
+    stats_attach_from_env();
+    if (!stats_shm_ptr) return;  // 没有 shm 就当没统计
+
+    /* 可选：检查 magic，防止 attach 到了错误的段 */
+    uint64_t mg = __atomic_load_n(&stats_shm_ptr->magic, __ATOMIC_ACQUIRE);
+    if (mg != FUZZ_STATS_MAGIC) return;
+
+    uint64_t t = __atomic_load_n(&stats_shm_ptr->pkt_total,   __ATOMIC_RELAXED);
+    uint64_t r = __atomic_load_n(&stats_shm_ptr->pkt_sem_ok,  __ATOMIC_RELAXED);
+    uint64_t g = __atomic_load_n(&stats_shm_ptr->pkt_gram_ok, __ATOMIC_RELAXED);
+    uint64_t s = __atomic_load_n(&stats_shm_ptr->pkt_exec_ok, __ATOMIC_RELAXED);
+
+    atomic_store(&g_pkt_total,   t);
+    atomic_store(&g_pkt_sem_suc, r);
+    atomic_store(&g_pkt_gram_suc,g);
+    atomic_store(&g_pkt_suc,     s);
 }
 
 /* Initialize the implemented state machine as a graphviz graph */
@@ -5558,7 +5624,8 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   u32 region_count = 0;
   region_t *regions = (*extract_requests)(out_buf, len, &region_count);
   if (!region_count) PFATAL("AFLNet Region count cannot be Zero");
-  M2_cur_cnt = region_count > max_seed_region_count ? max_seed_region_count : region_count;
+  // M2_cur_cnt = region_count > max_seed_region_count ? max_seed_region_count : region_count;
+  M2_cur_cnt = region_count;
   // update kl_messages linked list
   u32 i;
   kliter_t(lms) *prev_last_message, *cur_last_message;
@@ -9378,6 +9445,8 @@ int main(int argc, char** argv) {
   setup_post();
   setup_shm();
   setup_m2bit_shm();
+  setup_stats_shm();
+
   init_state_file();
   init_count_class16();
 
